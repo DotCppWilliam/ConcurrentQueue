@@ -432,9 +432,9 @@ size_t ConcurrentQueue<T>::SizeApprox() const
 {
     size_t size = 0;
     for (auto ptr = producer_list_tail_.load(std::memory_order_acquire); 
-        ptr != nullptr; ptr = ptr->next_prod()) 
+        ptr != nullptr; ptr = ptr->NextProd()) 
     {
-    	size += ptr->size_approx();
+    	size += ptr->SizeApprox();
     }
     return size;
 }
