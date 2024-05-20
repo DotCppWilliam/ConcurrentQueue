@@ -34,18 +34,17 @@ struct Block
     T* operator[](index_t index) noexcept;
     T const* operator[](index_t index) const noexcept;
 public:
-    Block* next_;
-    std::atomic<size_t> elements_completely_dequeued_;  // 元素完全出队的个数
+    Block* next_;   // 指向下一个Block
+    std::atomic<size_t> elements_completely_dequeued_;  // 元素完全出队的个数. [隐式生产者会用到]
 
-    // 块的位图,标志那个位置为空
-    std::atomic<bool> empty_flags_[kBlockSize <= kExplicitBlockEmptyCounterThreshold
-        ? kBlockSize : 1];
-    std::atomic<std::uint32_t> free_list_refs_;
-    std::atomic<Block<T>*> free_list_next_;
-    bool dynamically_allocated_;
-
+    // 块的位图,标志那个位置为空. [显示生产者会用到]
+    // 和elements的对应关系是: empty_flags从后向前 --> elements从前向后
+    std::atomic<bool> empty_flags_[kBlockSize <= kExplicitBlockEmptyCounterThreshold ? kBlockSize : 1];
+    std::atomic<std::uint32_t> free_list_refs_;     // 
+    std::atomic<Block<T>*> free_list_next_;         // 指向下一个空闲的块链表
+    bool dynamically_allocated_;                    // 是否是动态分配
 private:
-    // 定义字符数组变量,大小是sizeof(T) *   kBlockSize
+    // 存储队列中的元素, 元素类型为char,大小是 sizeof(T) * KBlockSize
     alignas(alignof(T)) typename Identify<char[sizeof(T) * kBlockSize]>::type elements;
 };
 
@@ -61,21 +60,33 @@ Block<T>::Block()
     free_list_next_(nullptr),
     dynamically_allocated_(true) { }
 
+
+
+/**
+ * @brief 判断块是否为空.隐式生产者使用原子变量判断,显式生产者使用位图
+ * 
+ * @return true 
+ * @return false 
+ */
 template <typename T>
 template <InnerQueueContext context>
 bool Block<T>::IsEmpty() const
 {
+// 显式生产者
     if (context == explicit_context 
         && kBlockSize <= kExplicitBlockEmptyCounterThreshold)
     {
         for (size_t i = 0; i < kBlockSize; i++)
         {
+            // 位图中相应位是否为false,为false表示为空
+            // 获取empty_flags中对应位置,empty_flags是从后向前对应着elements的
             if (!empty_flags_[i].load(std::memory_order_relaxed))
                 return false;
         }
         std::atomic_thread_fence(std::memory_order_acquire);
         return true;
     }
+// 隐式生产者
     else 
     {
         if (elements_completely_dequeued_.load(std::memory_order_relaxed)
@@ -90,6 +101,13 @@ bool Block<T>::IsEmpty() const
 }
 
 
+/**
+ * @brief 设置块为空.对于显式生产者,将对应位设置为true.隐式生产者将原子变量减1
+ * 
+ * @param i 
+ * @return true 
+ * @return false 
+ */
 template <typename T>
 template <InnerQueueContext context>
 bool Block<T>::SetEmpty(index_t i)
@@ -98,6 +116,7 @@ bool Block<T>::SetEmpty(index_t i)
         && kBlockSize <= kExplicitBlockEmptyCounterThreshold)
     {
         // 设置位图的相应位为true,表示该位置对应的数组位置为空
+        // 获取empty_flags中对应位置,empty_flags是从后向前对应着elements的
         empty_flags_[kBlockSize - 1 - static_cast<size_t>(
             i & static_cast<index_t>(kBlockSize - 1))].store(true, std::memory_order_release);
         return false;
@@ -111,14 +130,26 @@ bool Block<T>::SetEmpty(index_t i)
     }
 }
 
+
+
+/**
+ * @brief 将一些块设置为空.显式生产者
+ * 
+ * @param i 
+ * @param count 
+ * @return true 
+ * @return false 
+ */
 template <typename T>
 template <InnerQueueContext context>
 bool Block<T>::SetManyEmpty(index_t i, size_t count)
 {
+// 显式生产者
     if (context == explicit_context 
         && kBlockSize <= kExplicitBlockEmptyCounterThreshold) 
     {
         std::atomic_thread_fence(std::memory_order_release);
+        // 获取empty_flags中对应位置,empty_flags是从后向前对应着elements的
         i = kBlockSize - 1 - static_cast<size_t>(
             i & static_cast<index_t>(kBlockSize - 1)) - count + 1;
         for (size_t j = 0; j != count; ++j) 
@@ -128,26 +159,35 @@ bool Block<T>::SetManyEmpty(index_t i, size_t count)
         }
 		return false;
 	}
+// 隐式生产者
     else 
     {
+        // 将元素出队个数减去count
     	auto prevVal = elements_completely_dequeued_.fetch_add(
                 count, std::memory_order_release);
     	assert(prevVal + count <= kBlockSize);
     	return prevVal + count == kBlockSize;
     }
-
 }
 
+
+
+/**
+ * @brief 设置块都为空
+ * 
+ */
 template <typename T>
 template <InnerQueueContext context>
 void Block<T>::SetAllEmpty()
 {
+// 显式生产者
     if (context == explicit_context 
     	&& kBlockSize <= kExplicitBlockEmptyCounterThreshold) 
     {
     	for (size_t i = 0; i != kBlockSize; ++i) 
     		empty_flags_[i].store(true, std::memory_order_relaxed);
     }
+// 隐式生产者
     else 
     {
     	// Reset counter
@@ -156,6 +196,10 @@ void Block<T>::SetAllEmpty()
 }
 
 
+/**
+ * @brief 将块重置为默认值.显式生产者将位图都设置为false.隐式生产者将原子变量出队个数设置0
+ * 
+ */
 template <typename T>
 template <InnerQueueContext context>
 void Block<T>::ResetEmpty()
@@ -163,18 +207,23 @@ void Block<T>::ResetEmpty()
     if (context == explicit_context 
     	&& kBlockSize <= kExplicitBlockEmptyCounterThreshold) 
     {
-    	// Reset flags
+    	// 重置位图
     	for (size_t i = 0; i != kBlockSize; ++i) 
     		empty_flags_[i].store(false, std::memory_order_relaxed);
     }
     else 
     {
-    	// Reset counter
+    	// 重置计数器
     	elements_completely_dequeued_.store(0, std::memory_order_relaxed);
     }
 }
 
-
+/**
+ * @brief 获取底层元素数组中相应位置的地址
+ * 
+ * @param index 
+ * @return T* 
+ */
 template <typename T>
 T* Block<T>::operator[](index_t index) noexcept
 {
@@ -182,6 +231,13 @@ T* Block<T>::operator[](index_t index) noexcept
         + static_cast<size_t>(index & static_cast<index_t>(kBlockSize - 1));
 }
 
+
+/**
+ * @brief 获取底层元素数组中相应位置的地址
+ * 
+ * @param index 
+ * @return T* 
+ */
 template <typename T>
 T const* Block<T>::operator[](index_t index) const noexcept
 {

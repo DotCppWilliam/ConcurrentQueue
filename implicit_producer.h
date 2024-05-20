@@ -109,6 +109,9 @@ ImplicitProducer<T>::ImplicitProducer(ConcurrentQueue<T>* parent)
     block_index_(nullptr)
 { NewBlockIndex(); }
 
+
+
+
 template <typename T>
 ImplicitProducer<T>::~ImplicitProducer()
 {
@@ -116,7 +119,7 @@ ImplicitProducer<T>::~ImplicitProducer()
     auto index = this->head_index_.load(std::memory_order_relaxed);
     Block<T>* block = nullptr;
     assert(index == tail || CircularLessThan(index, tail));
-    bool force_free_last_block = index != tail;		// If we enter the loop, then the last (tail) block will not be freed
+    bool force_free_last_block = index != tail;		// 如果我们进入循环，那么最后一个（尾部）块将不会被释放
     while (index != tail) 
     {
     	if ((index & static_cast<index_t>(kBlockSize - 1)) == 0 || block == nullptr) 
@@ -154,8 +157,7 @@ ImplicitProducer<T>::~ImplicitProducer()
     }
 }
 
-template <typename T>
-template<AllocationMode alloc_mode, typename U>
+
 /**
  * @brief 数据入队操作.
  * 
@@ -163,12 +165,14 @@ template<AllocationMode alloc_mode, typename U>
  * @return true 
  * @return false 
  */
+template <typename T>
+template<AllocationMode alloc_mode, typename U>
 bool ImplicitProducer<T>::Enqueue(U&& element)
 {
     index_t current_tail_index = this->tail_index_.load(std::memory_order_relaxed);
 	index_t new_tail_index = 1 + current_tail_index;    // 下一次插入的块索引序号
 
-    // 限制tail_index_最大为kBlockSize - 1
+    // 还没有获取任何一个块或者获取的块已用完
     if ((current_tail_index & static_cast<index_t>(kBlockSize - 1)) == 0) 
     {
 	    // 我们到达了一个区块的末尾，开始一个新的区块
@@ -183,6 +187,7 @@ bool ImplicitProducer<T>::Enqueue(U&& element)
 	    }
 
         BlockIndexEntry* index_entry;
+        // 插入一个块索引,并获得这个块索引地址
 	    if (!InsertBlockIndexEntry<alloc_mode>(index_entry, current_tail_index)) 
         {
 	    	return false;
@@ -191,14 +196,14 @@ bool ImplicitProducer<T>::Enqueue(U&& element)
         auto new_block = this->parent_->ConcurrentQueue<T>::template 
             RequisitionBlock<alloc_mode>(); // 申请一个块
 
-        //Block<T>* new_block; // 测试 TODO
-        if (new_block == nullptr)
+        if (new_block == nullptr)   // 如果没有空块
         {
-            RewindBlockIndexTail();
+            RewindBlockIndexTail(); // 将块索引尾 向前移动一个位置
             index_entry->value_.store(nullptr, std::memory_order_relaxed);
             return false;
         }
 
+        // 将获取的这个块设置为空,可能是以前存留的旧值没有更新掉
         new_block->Block<T>::template ResetEmpty<implicit_context>();
 
         // 检测new运算符创建对象是否会抛出异常
@@ -233,6 +238,10 @@ bool ImplicitProducer<T>::Enqueue(U&& element)
     this->tail_index_.store(new_tail_index, std::memory_order_release);
     return true;
 }
+
+
+
+
 
 template <typename T>
 template<typename U>
@@ -311,14 +320,26 @@ bool ImplicitProducer<T>::Dequeue(U& element)
     return false;
 }
 
+
+
+
+
+/**
+ * @brief 批量入队
+ * 
+ * @param item_first item_first是一个列表的首地址,这个列表必须支持++运算符
+ * @param count 列表的元素个数
+ * @return true 
+ * @return false 
+ */
 template <typename T>
 template<AllocationMode allocMode, typename It>
 bool ImplicitProducer<T>::EnqueueBulk(It item_first, size_t count)
 {
     index_t start_tail_index = this->tail_index_.load(std::memory_order_relaxed);
     auto start_block = this->tail_block_;
-    Block<T>* first_allocated_block = nullptr;
-    auto end_block = this->tail_block_;
+    Block<T>* first_allocated_block = nullptr;      // 第一个分配的块
+    auto end_block = this->tail_block_;             // 最后一个分配的块
 
     size_t block_base_diff = ((start_tail_index + count - 1) & ~static_cast<index_t>(kBlockSize - 1)) 
         - ((start_tail_index - 1) & ~static_cast<index_t>(kBlockSize - 1));
@@ -333,7 +354,7 @@ bool ImplicitProducer<T>::EnqueueBulk(It item_first, size_t count)
 		    BlockIndexEntry* index_entry = nullptr;  // initialization here unnecessary but compiler can't always tell
 		    Block<T>* new_block;
 		    bool index_inserted = false;
-		    auto head = this->head_Index_.load(std::memory_order_relaxed);
+		    auto head = this->head_index_.load(std::memory_order_relaxed);
 		    assert(!CircularLessThan<index_t>(current_tail_index, head));
 		    bool full = !CircularLessThan<index_t>(head, current_tail_index + kBlockSize) 
                 || (kMaxSubqueueSize != ConstNumericMax<size_t>::value 
@@ -359,7 +380,7 @@ bool ImplicitProducer<T>::EnqueueBulk(It item_first, size_t count)
 		    		index_entry->value_.store(nullptr, std::memory_order_relaxed);
 		    		RewindBlockIndexTail();
 		    	}
-		    	this->parent_->add_blocks_to_free_list(first_allocated_block);
+		    	this->parent_->AddBlockToFreeList(first_allocated_block);
 		    	this->tail_block_ = start_block;
 		    	
 		    	return false;
@@ -397,8 +418,8 @@ bool ImplicitProducer<T>::EnqueueBulk(It item_first, size_t count)
         {
     		stopIndex = new_tail_index;
     	}
-
-    	if (noexcept(new(static_cast<T *>(nullptr)) T(DerefNoexcept(item_first)))) 
+        
+    	if (noexcept(new (static_cast<T *>(nullptr)) T(DerefNoexcept(item_first)))) 
         {
     		while (current_tail_index != stopIndex) 
             {
@@ -412,8 +433,8 @@ bool ImplicitProducer<T>::EnqueueBulk(It item_first, size_t count)
     			while (current_tail_index != stopIndex) 
                 {
                     new ((*this->tail_block_)[current_tail_index]) 
-                        T(NoMoveIf<!noexcept(new(static_cast<T *>(nullptr)) 
-                            T(DerefNoexcept(item_first)))>::Eval(*item_first));
+                        T(NoMoveIf<!noexcept(new (static_cast<T*>(nullptr)) T(DerefNoexcept(item_first)))>::Eval(*item_first));
+
     				++current_tail_index;
     				++item_first;
     			}
@@ -454,7 +475,7 @@ bool ImplicitProducer<T>::EnqueueBulk(It item_first, size_t count)
     				index_entry->value_.store(nullptr, std::memory_order_relaxed);
     				RewindBlockIndexTail();
     			}
-    			this->parent_->add_blocks_to_free_list(first_allocated_block);
+    			this->parent_->AddBlockToFreeList(first_allocated_block);
     			this->tail_block_ = start_block;
     			throw;
     		}
@@ -471,6 +492,11 @@ bool ImplicitProducer<T>::EnqueueBulk(It item_first, size_t count)
     this->tail_index_.store(new_tail_index, std::memory_order_release);
     return true;
 }
+
+
+
+
+
 
 template <typename T>
 template<typename It>
@@ -583,6 +609,13 @@ size_t ImplicitProducer<T>::DequeueBulk(It& item_first, size_t max)
 }
 
 
+
+
+
+
+
+
+
 /**
  * @brief 插入一个块索引,参数block_start_index作为索引的key
  *         并返回这块索引地址,返回值为参数index_entry
@@ -613,8 +646,6 @@ bool ImplicitProducer<T>::InsertBlockIndexEntry(BlockIndexEntry*& index_entry, i
 
     // 执行到这里,表示这个块索引已经被用过了
 
-
-
     if (alloc_mode == CANNOT_ALLOC) // 如果分配模式是不能分配,那么则退出
     	return false;
     else if (!NewBlockIndex())  // 分配模式为可以分配,则重新分配一个块索引数组
@@ -635,6 +666,10 @@ bool ImplicitProducer<T>::InsertBlockIndexEntry(BlockIndexEntry*& index_entry, i
     }
 }
 
+
+
+
+
 /**
  * @brief 回滚块索引尾部,将尾部向前移动一个位置
  * 
@@ -646,6 +681,9 @@ void ImplicitProducer<T>::RewindBlockIndexTail()
 	local_block_index->tail_.store((local_block_index->tail_.load(std::memory_order_relaxed) - 1) 
         & (local_block_index->capacity_ - 1), std::memory_order_relaxed);
 }
+
+
+
 
 
 /**
@@ -665,8 +703,10 @@ typename ImplicitProducer<T>::BlockIndexEntry*
 
 
 
+
+
 /**
- * @brief 
+ * @brief 可能批量入队多个元素,这会导致tail_index的值比块的大小还要大.所以将其设置为正确的下标
  * 
  * @param index 输入参数
  * @param local_block_index 输出参数,
@@ -677,13 +717,17 @@ size_t ImplicitProducer<T>::GetBlockIndexIndexForIndex(index_t index, BlockIndex
 {
     index &= ~static_cast<index_t>(kBlockSize - 1);
     local_block_index = block_index_.load(std::memory_order_acquire);
-    auto tail = local_block_index->tail_.load(std::memory_order_acquire);
-    auto tail_base = local_block_index->index_[tail]->key_.load(std::memory_order_relaxed);
-    assert(tail_base != kInvalidBlockBase);
+    auto tail = local_block_index->tail_.load(std::memory_order_acquire);   // 获取尾部块索引
+
+    // 获取尾部块索引存储的索引号. 可能因为批量入队导致这个值超过kBlockSize
+    auto tail_base = local_block_index->index_[tail]->key_.load(std::memory_order_relaxed); 
+    assert(tail_base != kInvalidBlockBase); // 这个索引号是可用的
+
     // Note: 必须使用除法而不是移位，因为索引可能会循环，导致负偏移，我们希望保留其负值
     auto offset = static_cast<size_t>(static_cast<typename std::make_signed<index_t>::type>(index - tail_base) 
         / static_cast<typename std::make_signed<index_t>::type>(kBlockSize));
     size_t idx = (tail + offset) & (local_block_index->capacity_ - 1);
+
     assert(local_block_index->index_[idx]->key_.load(std::memory_order_relaxed) ==   
         local_block_index->index_[idx]->key_.load(std::memory_order_relaxed));
     return idx;

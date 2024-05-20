@@ -67,13 +67,9 @@ static U* Create()
     return p != nullptr ? new (p) U : nullptr;
 }
 
-#include <typeinfo>
-#include <iostream>
-
 template<typename U, typename A1>
 static U* Create(A1&& a1)
 {
-    std::cout << typeid(U).name() << "\t" << typeid(A1).name() << std::endl;
     void* p = AlignedMalloc<U>(sizeof(U));
     return p != nullptr ? new (p) U(std::forward<A1>(a1)) : nullptr;
 }

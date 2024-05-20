@@ -218,7 +218,7 @@ template<>
 struct NoMoveIf<false>
 {
 	template<typename U>
-	static inline auto eval(U&& x)
+	static inline auto Eval(U&& x)
 		-> decltype(std::forward<U>(x))
 	{
 		return std::forward<U>(x);

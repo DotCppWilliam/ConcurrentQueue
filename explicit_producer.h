@@ -9,6 +9,7 @@
 #include <cassert>
 #include <cstddef>
 #include <stdlib.h>
+#include <block.h>
 
 template <typename T> class ConcurrentQueue;
 
