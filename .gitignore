@@ -1,5 +1,6 @@
-test.cpp
 build/
 .cache
 .vscode
 bin/
+.gitignore
+lib/
